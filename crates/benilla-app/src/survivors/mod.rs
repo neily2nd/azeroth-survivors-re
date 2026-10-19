@@ -8,16 +8,23 @@ mod abilities;
 mod auto;
 mod cards;
 mod data;
+mod descriptions;
 mod enemies;
 mod grade;
 mod hero;
 mod hud;
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) mod install;
+mod level_up;
 mod menu;
 mod minimap;
 mod mobility;
+mod run_lifecycle;
+mod tooltips;
+mod ui_art;
 mod units;
+
+pub(crate) use hud::SweepUiMaterial;
 
 #[cfg(test)]
 mod sim;
@@ -54,7 +61,7 @@ impl Plugin for SurvivorsPlugin {
             .init_resource::<hero::AimPoint>()
             .init_resource::<abilities::PendingHits>()
             .init_resource::<enemies::Spawner>()
-            .init_resource::<hud::Offer>()
+            .init_resource::<level_up::Offer>()
             .init_resource::<cards::PendingPick>()
             .add_plugins(bevy::ui_render::UiMaterialPlugin::<hud::SweepUiMaterial>::default())
             .add_systems(Startup, hud::setup_hud)
@@ -99,9 +106,9 @@ impl Plugin for SurvivorsPlugin {
                 Update,
                 (
                     hud::apply_ui_scale,
-                    hud::fill_art,
+                    ui_art::fill_art,
                     hud::xp_hover,
-                    hud::icon_tooltip,
+                    tooltips::icon_tooltip,
                     hud::hero_plate,
                     minimap::map_buttons,
                     minimap::zone_text,
@@ -111,7 +118,7 @@ impl Plugin for SurvivorsPlugin {
                     .after(hud::show_panels),
             )
             .add_systems(OnEnter(Phase::Paused), pause)
-            .add_systems(OnEnter(Phase::Menu), (unpause, reset_run));
+            .add_systems(OnEnter(Phase::Menu), (unpause, run_lifecycle::reset_run));
         add_run_loop(app);
         if let Some(auto) = auto::from_env() {
             app.insert_resource(auto)
@@ -414,30 +421,6 @@ fn add_run_loop(app: &mut App) {
             (enemies::reap_dead, enemies::still_gems).after(WorldStage::Input),
         )
         .add_systems(OnEnter(Phase::Playing), unpause)
-        .add_systems(OnEnter(Phase::LevelUp), (pause, hud::roll_offer))
+        .add_systems(OnEnter(Phase::LevelUp), (pause, level_up::roll_offer))
         .add_systems(OnEnter(Phase::GameOver), unpause);
-}
-
-/// Back at the menu: everything the last run spawned goes, and the run starts over.
-fn reset_run(
-    mut commands: Commands,
-    spawned: Query<Entity, With<RunEntity>>,
-    mut run: ResMut<Run>,
-    mut pending: ResMut<abilities::PendingHits>,
-    mut spawner: ResMut<enemies::Spawner>,
-    mut selection: ResMut<Selection>,
-) {
-    for e in &spawned {
-        commands.entity(e).despawn();
-    }
-    // Guids stay unique across runs: caches keyed by guid may outlive a despawn by a frame.
-    let next_guid = run.next_guid;
-    *run = Run {
-        next_guid,
-        ..Run::default()
-    };
-    pending.0.clear();
-    *spawner = enemies::Spawner::default();
-    // The preview hero is respawned for the look still picked.
-    selection.version += 1;
 }

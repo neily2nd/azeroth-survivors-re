@@ -11,18 +11,22 @@ use bevy::shader::ShaderRef;
 use bevy::ui_render::ui_material::{MaterialNode, UiMaterial};
 use bevy::window::PrimaryWindow;
 
-use super::data::{self, AbilityDef, Effect, Kind, PassiveDef, Stat};
+use super::data;
 use super::hero::{self, Hero};
+#[cfg(test)]
+pub(super) use super::level_up::choices_for;
 use super::minimap::{self, MiniMap};
-use super::{Owned, Phase, Rng, Run, Selection, Stats};
+use super::tooltips::TipFor;
+use super::ui_art::UiArt;
+use super::{Phase, Run, Selection};
 
-const GOLD: Color = Color::srgb(1.0, 0.82, 0.0);
+pub(super) const GOLD: Color = Color::srgb(1.0, 0.82, 0.0);
 /// The mobility button's edge, an action button's 36 units.
 const MOBILITY_SIZE: f32 = 40.0;
 const EDGE: Color = Color::srgb(0.55, 0.45, 0.25);
 const BUTTON: Color = Color::srgba(0.18, 0.06, 0.04, 0.95);
 const BUTTON_HOT: Color = Color::srgba(0.36, 0.12, 0.06, 0.98);
-const DIM: Color = Color::srgb(0.6, 0.6, 0.6);
+pub(super) const DIM: Color = Color::srgb(0.6, 0.6, 0.6);
 pub(super) const DIM_GREY: Color = DIM;
 pub(super) const GOLD_TONE: Color = GOLD;
 
@@ -75,9 +79,9 @@ pub(super) struct LevelUpSub;
 /// A radial cooldown sweep over one ability icon: `sweep` is the remaining fraction
 /// (1.0 = just cast, 0.0 = ready), drawn by `ui_sweep.wgsl`.
 #[derive(Asset, TypePath, AsBindGroup, Clone)]
-pub(super) struct SweepUiMaterial {
+pub(crate) struct SweepUiMaterial {
     #[uniform(0)]
-    pub(super) sweep: f32,
+    pub(crate) sweep: f32,
 }
 
 impl UiMaterial for SweepUiMaterial {
@@ -115,50 +119,6 @@ pub(super) struct SpellIcon(pub(super) u32);
 #[derive(Component)]
 pub(super) struct IconDone;
 
-/// A FrameXML `Texture` region: a client art file, its `TexCoords` (left, right, top, bottom) and
-/// vertex colour, drawn once the archives are readable.
-#[derive(Component)]
-pub(super) struct UiArt {
-    path: &'static str,
-    coords: [f32; 4],
-    tint: Color,
-}
-
-impl UiArt {
-    pub(super) fn crop(path: &'static str, coords: [f32; 4]) -> Self {
-        Self {
-            path,
-            coords,
-            tint: Color::WHITE,
-        }
-    }
-
-    fn tinted(path: &'static str, tint: Color) -> Self {
-        Self {
-            path,
-            coords: [0.0, 1.0, 0.0, 1.0],
-            tint,
-        }
-    }
-}
-
-#[derive(Component)]
-pub(super) struct ArtDone;
-
-/// What an icon slot's tooltip describes: an index into the run's abilities or passives.
-#[derive(Component, Clone, Copy, PartialEq, Eq, Debug)]
-pub(super) enum TipFor {
-    Ability(usize),
-    Passive(usize),
-    Mobility,
-}
-
-/// The one `GameTooltip`, and the column its lines go in.
-#[derive(Component)]
-pub(super) struct GameTooltip;
-#[derive(Component)]
-pub(super) struct TipBody;
-
 #[derive(Component, Clone, Copy, PartialEq)]
 pub(super) enum UiAction {
     Resume,
@@ -169,31 +129,6 @@ pub(super) enum UiAction {
 /// The colour a button returns to when not hovered.
 #[derive(Component)]
 pub(super) struct BaseColor(Color);
-
-#[derive(Clone, Copy)]
-pub(super) enum Choice {
-    NewAbility(&'static AbilityDef),
-    Upgrade(usize),
-    NewPassive(&'static PassiveDef),
-    UpPassive(usize),
-    Heal,
-}
-
-/// The level-up cards on offer.
-#[derive(Resource, Default)]
-pub(super) struct Offer {
-    pub(super) choices: Vec<Choice>,
-}
-
-impl Offer {
-    pub(super) fn len(&self) -> usize {
-        self.choices.len()
-    }
-
-    pub(super) fn choices(&self) -> &[Choice] {
-        &self.choices
-    }
-}
 
 #[derive(Resource)]
 pub(super) struct HudFont(pub(super) Handle<Font>);
@@ -270,13 +205,6 @@ fn icon(spell: u32, size: f32) -> impl Bundle {
         },
         SpellIcon(spell),
     )
-}
-
-fn spell_name(spells: Option<&crate::ui_action::Spells>, spell: u32, fallback: &str) -> String {
-    spells
-        .and_then(|s| s.catalog.get(spell))
-        .map(|d| d.name.clone())
-        .unwrap_or_else(|| fallback.replace('_', " "))
 }
 
 pub(super) fn setup_hud(
@@ -900,113 +828,6 @@ pub(super) fn menu_preview(
     );
 }
 
-pub(super) fn start_run(run: &mut Run, selection: &mut Selection) -> bool {
-    let (Some(class), Some(&(_, race, _))) = (
-        selection.class_def(),
-        selection.look.and_then(|i| selection.looks.get(i)),
-    ) else {
-        return false;
-    };
-    // The world goes to the battleground picked; until now it stood in the last one.
-    selection.stage = selection.map;
-    let next_guid = run.next_guid;
-    *run = Run {
-        class,
-        race,
-        next_guid,
-        ..Run::default()
-    };
-    run.abilities.push(Owned {
-        def: data::ability(class.start),
-        level: 1,
-        cd: 0.5,
-    });
-    run.hp = run.stats().max_hp;
-    run.version += 1;
-    true
-}
-
-pub(super) fn choices_for(run: &Run, rng: &mut Rng) -> Vec<Choice> {
-    let mut pool: Vec<(Choice, f32)> = Vec::new();
-    for (i, o) in run.abilities.iter().enumerate() {
-        if o.level < data::MAX_ABILITY_LEVEL {
-            pool.push((Choice::Upgrade(i), 1.2));
-        }
-    }
-    if run.abilities.len() < data::MAX_ABILITIES {
-        for key in run.class.pool {
-            if !run.abilities.iter().any(|o| o.def.key == *key) {
-                pool.push((Choice::NewAbility(data::ability(key)), 1.0));
-            }
-        }
-    }
-    for (i, (_, level)) in run.passives.iter().enumerate() {
-        if *level < data::MAX_PASSIVE_LEVEL {
-            pool.push((Choice::UpPassive(i), 0.8));
-        }
-    }
-    if run.passives.len() < data::MAX_PASSIVES {
-        for p in data::PASSIVES {
-            if !run.passives.iter().any(|(q, _)| q.key == p.key) {
-                pool.push((Choice::NewPassive(p), 0.5));
-            }
-        }
-    }
-    let mut out = Vec::with_capacity(3);
-    while out.len() < 3 && !pool.is_empty() {
-        let total: f32 = pool.iter().map(|(_, w)| w).sum();
-        let mut pick = rng.f32() * total;
-        let mut idx = pool.len() - 1;
-        for (i, (_, w)) in pool.iter().enumerate() {
-            if pick < *w {
-                idx = i;
-                break;
-            }
-            pick -= w;
-        }
-        out.push(pool.swap_remove(idx).0);
-    }
-    if out.is_empty() {
-        out.push(Choice::Heal);
-    }
-    out
-}
-
-pub(super) fn roll_offer(run: Res<Run>, mut rng: ResMut<Rng>, mut offer: ResMut<Offer>) {
-    offer.choices = choices_for(&run, &mut rng);
-}
-
-pub(super) fn pick(
-    i: usize,
-    run: &mut Run,
-    offer: &mut Offer,
-    rng: &mut Rng,
-    next: &mut NextState<Phase>,
-) {
-    let Some(&choice) = offer.choices.get(i) else {
-        return;
-    };
-    match choice {
-        Choice::NewAbility(def) => run.abilities.push(Owned {
-            def,
-            level: 1,
-            cd: 0.3,
-        }),
-        Choice::Upgrade(k) => run.abilities[k].level += 1,
-        Choice::NewPassive(p) => run.passives.push((p, 1)),
-        Choice::UpPassive(k) => run.passives[k].1 += 1,
-        Choice::Heal => run.hp = run.stats().max_hp,
-    }
-    run.version += 1;
-    run.pending_levels = run.pending_levels.saturating_sub(1);
-    if run.pending_levels > 0 {
-        offer.choices = choices_for(run, rng);
-    } else {
-        offer.choices.clear();
-        next.set(Phase::Playing);
-    }
-}
-
 pub(super) fn looks_for(
     class: &data::ClassDef,
     creatures: &crate::entities::Creatures,
@@ -1061,7 +882,9 @@ pub(super) fn keys(
 ) {
     match phase.get() {
         Phase::Menu => {
-            if keys.just_pressed(KeyCode::Enter) && start_run(&mut run, &mut selection) {
+            if keys.just_pressed(KeyCode::Enter)
+                && super::run_lifecycle::start_run(&mut run, &mut selection)
+            {
                 next.set(Phase::Playing);
             }
         }
@@ -1099,118 +922,6 @@ pub(super) fn refresh_menu(
                 selection.version += 1;
             }
         }
-    }
-}
-
-/// What a level-up card shows.
-pub(super) struct CardText {
-    pub spell: u32,
-    pub name: String,
-    pub tag: String,
-    pub tag_color: Color,
-    pub desc: String,
-    /// `(rank now, top rank)`, for the pips; `None` for the healthstone.
-    pub ranks: Option<(u8, u8)>,
-}
-
-pub(super) fn describe_card(
-    choice: Choice,
-    run: &Run,
-    spells: Option<&crate::ui_action::Spells>,
-) -> CardText {
-    let new = Color::srgb(0.3, 1.0, 0.3);
-    match choice {
-        Choice::NewAbility(def) => {
-            let stats = run.stats();
-            let c = cast_at(def, 1, &stats);
-            CardText {
-                spell: def.spell,
-                name: spell_name(spells, def.spell, def.key),
-                tag: "New spell".into(),
-                tag_color: new,
-                desc: format!("{}.", ability_body(def, &c)),
-                ranks: Some((0, data::MAX_ABILITY_LEVEL)),
-            }
-        }
-        Choice::Upgrade(k) => {
-            let o = &run.abilities[k];
-            let next = o.level + 1;
-            let stats = run.stats();
-            let (a, b) = (
-                cast_at(o.def, o.level, &stats),
-                cast_at(o.def, next, &stats),
-            );
-            // What actually changes, as before → after.
-            let mut lines = Vec::new();
-            let (da, db) = if a.dmg > 0.0 {
-                (a.dmg, b.dmg)
-            } else {
-                (a.dot, b.dot)
-            };
-            if db > da {
-                lines.push(format!("Damage {} » {}", num(da), num(db)));
-            }
-            if b.cooldown < a.cooldown - 0.01 {
-                lines.push(format!(
-                    "Cooldown {}s » {}s",
-                    num(a.cooldown),
-                    num(b.cooldown)
-                ));
-            }
-            if b.count > a.count {
-                lines.push(format!("Targets {} » {}", a.count, b.count));
-            }
-            if b.radius > a.radius + 0.05 {
-                lines.push(format!("Area {} » {} yd", num(a.radius), num(b.radius)));
-            }
-            if b.duration > a.duration + 0.05 {
-                lines.push(format!("Lasts {}s » {}s", num(a.duration), num(b.duration)));
-            }
-            CardText {
-                spell: o.def.spell,
-                name: spell_name(spells, o.def.spell, o.def.key),
-                tag: format!("Rank {} » {next}", o.level),
-                tag_color: Color::WHITE,
-                desc: lines.join("\n"),
-                ranks: Some((o.level, data::MAX_ABILITY_LEVEL)),
-            }
-        }
-        Choice::NewPassive(p) => CardText {
-            spell: p.spell,
-            name: p.name.into(),
-            tag: "New talent".into(),
-            tag_color: new,
-            desc: passive_text(p.stat, p.per_level),
-            ranks: Some((0, data::MAX_PASSIVE_LEVEL)),
-        },
-        Choice::UpPassive(k) => {
-            let (p, level) = run.passives[k];
-            let fmt = |v: f32| match p.stat {
-                Stat::Regen | Stat::Armor => num(v),
-                _ => pct(v),
-            };
-            CardText {
-                spell: p.spell,
-                name: p.name.into(),
-                tag: format!("Rank {level} » {}", level + 1),
-                tag_color: Color::WHITE,
-                desc: format!(
-                    "{}\n{} » {}",
-                    stat_label(p.stat),
-                    fmt(p.per_level * f32::from(level)),
-                    fmt(p.per_level * f32::from(level + 1)),
-                ),
-                ranks: Some((level, data::MAX_PASSIVE_LEVEL)),
-            }
-        }
-        Choice::Heal => CardText {
-            spell: 5720,
-            name: "Healthstone".into(),
-            tag: "Restore".into(),
-            tag_color: Color::WHITE,
-            desc: "Everything is mastered. Restores all health.".into(),
-            ranks: None,
-        },
     }
 }
 
@@ -1468,29 +1179,6 @@ pub(super) fn update_cooldown_sweeps(
     }
 }
 
-/// Draw each [`UiArt`] region once its file can be read.
-pub(super) fn fill_art(
-    mut commands: Commands,
-    mut regions: Query<(Entity, &mut ImageNode, &UiArt), Without<ArtDone>>,
-    assets: Option<ResMut<benilla_assets::WorldAssets>>,
-    mut images: ResMut<Assets<Image>>,
-) {
-    let Some(mut assets) = assets else { return };
-    for (e, mut img, art) in &mut regions {
-        commands.entity(e).insert(ArtDone);
-        let Some(h) = assets.sprite_texture(art.path, &mut images) else {
-            warn!("survivors: no UI art {}", art.path);
-            continue;
-        };
-        let [l, r, t, b] = art.coords;
-        if let Some(size) = images.get(&h).map(Image::size_f32) {
-            img.rect = Some(Rect::new(l * size.x, t * size.y, r * size.x, b * size.y));
-        }
-        img.image = h;
-        img.color = art.tint;
-    }
-}
-
 /// The reference lays its UI out on a screen 768 units tall at any resolution (`useUiScale` off).
 pub(super) fn apply_ui_scale(
     windows: Query<&Window, With<PrimaryWindow>>,
@@ -1608,43 +1296,6 @@ pub(super) fn xp_hover(
     }
 }
 
-// ── The build icons' `GameTooltip` ──────────────────────────────────────────────────────────────
-
-/// `TOOLTIP_DEFAULT_BACKGROUND_COLOR`, the `GameTooltip` backdrop tint (`GameTooltip.lua`).
-const TIP_FILL: Color = Color::srgb(0.09, 0.09, 0.19);
-/// The grey a spell tooltip prints its rank in, right of the name.
-const TIP_GREY: Color = Color::srgb(0.5, 0.5, 0.5);
-
-/// One tooltip line: the left text, an optional right-aligned one, the colour and font size
-/// (`GameTooltipHeaderText` 14, `GameTooltipText` 12).
-struct TipLine {
-    left: String,
-    right: Option<(String, Color)>,
-    color: Color,
-    size: f32,
-}
-
-impl TipLine {
-    fn new(left: impl Into<String>, color: Color) -> Self {
-        Self {
-            left: left.into(),
-            right: None,
-            color,
-            size: 12.0,
-        }
-    }
-
-    fn right(mut self, text: impl Into<String>, color: Color) -> Self {
-        self.right = Some((text.into(), color));
-        self
-    }
-
-    fn header(mut self) -> Self {
-        self.size = 14.0;
-        self
-    }
-}
-
 /// The results screen's tiles and its line under the title.
 #[allow(clippy::type_complexity)]
 pub(super) fn refresh_results(
@@ -1691,498 +1342,6 @@ fn compact(v: f64) -> String {
     } else {
         format!("{}", v.round() as u64)
     }
-}
-
-fn num(v: f32) -> String {
-    if (v - v.round()).abs() < 0.05 {
-        format!("{}", v.round() as i64)
-    } else {
-        format!("{v:.1}")
-    }
-}
-
-fn pct(v: f32) -> String {
-    format!("{}%", num(v * 100.0))
-}
-
-/// The numbers an ability casts with at a level, as [`super::abilities::cast_abilities`] takes
-/// them from [`Owned`].
-struct Cast {
-    dmg: f32,
-    dot: f32,
-    count: u32,
-    radius: f32,
-    duration: f32,
-    cooldown: f32,
-}
-
-fn cast_at(def: &'static AbilityDef, level: u8, stats: &Stats) -> Cast {
-    let o = Owned {
-        def,
-        level,
-        cd: 0.0,
-    };
-    let mult = o.damage_mult() * stats.might;
-    Cast {
-        dmg: def.damage * mult,
-        dot: def.dot * mult,
-        count: o.count(),
-        radius: o.radius(stats),
-        duration: o.duration(),
-        cooldown: o.cooldown(stats),
-    }
-}
-
-fn effect_text(effect: Effect) -> Option<String> {
-    Some(match effect {
-        Effect::None => return None,
-        Effect::Slow(m, t) => format!("slowing them by {} for {} sec", pct(1.0 - m), num(t)),
-        Effect::Root(t) => format!("freezing them in place for {} sec", num(t)),
-        Effect::Stun(t) => format!("stunning them for {} sec", num(t)),
-        Effect::Fear(t) => format!("sending them fleeing for {} sec", num(t)),
-        Effect::Weaken(m, t) => format!(
-            "cutting their damage by {} for {} sec",
-            pct(1.0 - m),
-            num(t)
-        ),
-        Effect::Drain(f) => format!("healing you for {} of the damage", pct(f)),
-        Effect::Execute(f) => format!("killing them outright below {} health", pct(f)),
-    })
-}
-
-/// What an ability does at these numbers, in the voice of a spell description.
-fn ability_body(def: &AbilityDef, c: &Cast) -> String {
-    let d = num(c.dmg);
-    let burst = def.duration <= 0.0;
-    let mut s = match def.kind {
-        Kind::Bolt | Kind::Strike | Kind::Melee => {
-            let toughest = matches!(def.key, "pyroblast" | "aimed_shot" | "exorcism" | "starfire");
-            let melee = def.kind == Kind::Melee;
-            let who = match (toughest, melee, c.count) {
-                (true, _, 1) => "the toughest enemy in range".to_string(),
-                (true, _, n) => format!("the {n} toughest enemies in range"),
-                (false, true, 1) => "the closest enemy".into(),
-                (false, true, n) => format!("the {n} closest enemies"),
-                (false, false, 1) => "the nearest enemy".into(),
-                (false, false, n) => format!("the {n} nearest enemies"),
-            };
-            let mut s = format!("{} {who} for {d} damage", if melee { "Strikes" } else { "Hits" });
-            if c.radius > 0.0 && !melee {
-                s += &format!(", and everything within {} yd of the hit", num(c.radius));
-            }
-            s
-        }
-        Kind::Nova => format!("Deals {d} damage to every enemy within {} yd of you", num(c.radius)),
-        Kind::Cone => format!("Deals {d} damage to every enemy in a {} yd cone toward the closest", num(c.radius)),
-        Kind::Ground | Kind::GroundSelf => {
-            let at = if def.kind == Kind::GroundSelf { "around you" } else { "on the thickest pack" };
-            if burst {
-                format!("Strikes a {} yd area {at} for {d} damage", num(c.radius))
-            } else {
-                format!(
-                    "Covers a {} yd area {at} for {} sec, dealing {d} damage every second",
-                    num(c.radius),
-                    num(c.duration)
-                )
-            }
-        }
-        Kind::Chain => format!(
-            "Strikes the nearest enemy for {d} damage, then jumps to {} more within {} yd of each other, 15% weaker with every jump",
-            c.count,
-            num(c.radius)
-        ),
-        Kind::Dot => format!(
-            "Afflicts {} enemies in range with {} damage every second for {} sec",
-            c.count,
-            num(c.dot),
-            num(c.duration)
-        ),
-        Kind::Aura => format!(
-            "Every {} sec, deals {d} damage to every enemy within {} yd of you",
-            num(c.cooldown),
-            num(c.radius)
-        ),
-        Kind::Orbit => format!(
-            "Every {} sec, zaps {} within {} yd of you for {d} damage",
-            num(c.cooldown),
-            if c.count == 1 { "an enemy".to_string() } else { format!("{} enemies", c.count) },
-            num(c.radius)
-        ),
-        Kind::Shield => format!("Absorbs the next {d} damage you take within {} sec", num(c.duration)),
-        Kind::Immune => format!(
-            "When an enemy closes in, makes you immune to all damage for {} sec",
-            num(c.duration)
-        ),
-        Kind::Thorns => format!(
-            "When enemies close in, deals {d} damage to every attacker for {} sec",
-            num(c.duration)
-        ),
-        Kind::Heal => format!("Below 85% health, heals you for {d} over {} sec", num(c.duration)),
-        Kind::Totem if def.key == "magma_totem" => format!(
-            "Drops a totem for {} sec that burns every enemy within {} yd for {d} damage every 2 sec",
-            num(c.duration),
-            num(c.radius)
-        ),
-        Kind::Totem => format!(
-            "Drops a totem for {} sec that hits the nearest enemy within {} yd for {d} damage every second",
-            num(c.duration),
-            num(def.range)
-        ),
-    };
-    // Areas that tick carry no over-time part; a burst leaves a 5 second one.
-    let ground = matches!(def.kind, Kind::Ground | Kind::GroundSelf);
-    if c.dot > 0.0 && def.kind != Kind::Dot && (!ground || burst) {
-        let secs = if ground { 5.0 } else { c.duration };
-        s += &format!(
-            ", then {} damage every second for {} sec",
-            num(c.dot),
-            num(secs)
-        );
-    }
-    if let Some(e) = effect_text(def.effect) {
-        s += ", ";
-        s += &e;
-    }
-    s.push('.');
-    s
-}
-
-/// What the next rank changes, at the current stats.
-fn next_rank(def: &AbilityDef, now: &Cast, next: &Cast) -> String {
-    let what = match def.kind {
-        Kind::Shield => "absorbed",
-        Kind::Heal => "healing",
-        _ => "damage",
-    };
-    let mut gains = Vec::new();
-    if next.dmg > 0.0 && def.kind != Kind::Dot && def.kind != Kind::Immune {
-        gains.push(format!("{} {what}", num(next.dmg)));
-    }
-    if next.dot > 0.0 {
-        gains.push(format!("{} damage per second", num(next.dot)));
-    }
-    if next.count != now.count
-        && matches!(
-            def.kind,
-            Kind::Bolt | Kind::Strike | Kind::Melee | Kind::Dot | Kind::Chain | Kind::Orbit
-        )
-    {
-        gains.push(match def.kind {
-            Kind::Chain => format!("{} jumps", next.count),
-            _ => format!("{} targets", next.count),
-        });
-    }
-    if next.radius > 0.0 {
-        gains.push(format!("{} yd", num(next.radius)));
-    }
-    if next.duration > 0.0 {
-        gains.push(format!("{} sec", num(next.duration)));
-    }
-    gains.push(format!("{} sec cooldown", num(next.cooldown)));
-    gains.join(", ")
-}
-
-fn ability_tip(
-    o: &Owned,
-    stats: &Stats,
-    spells: Option<&crate::ui_action::Spells>,
-) -> Vec<TipLine> {
-    let def = o.def;
-    let now = cast_at(def, o.level, stats);
-    let mut lines = vec![
-        TipLine::new(spell_name(spells, def.spell, def.key), Color::WHITE)
-            .header()
-            .right(format!("Rank {}", o.level), TIP_GREY),
-    ];
-    let range = match def.kind {
-        Kind::Melee => Some("Melee Range".to_string()),
-        Kind::Bolt | Kind::Strike | Kind::Chain | Kind::Dot | Kind::Ground | Kind::Totem => {
-            Some(format!("{} yd range", num(def.range)))
-        }
-        _ => None,
-    };
-    let mut cast = TipLine::new("Casts itself", Color::WHITE);
-    if let Some(range) = range {
-        cast = cast.right(range, Color::WHITE);
-    }
-    lines.push(cast);
-    lines.push(
-        TipLine::new("Instant", Color::WHITE)
-            .right(format!("{} sec cooldown", num(now.cooldown)), Color::WHITE),
-    );
-    lines.push(TipLine::new(ability_body(def, &now), GOLD));
-    if !matches!(
-        def.kind,
-        Kind::Shield | Kind::Immune | Kind::Heal | Kind::Dot
-    ) {
-        lines.push(TipLine::new(
-            format!(
-                "{} chance to critically strike for double damage",
-                pct(stats.crit)
-            ),
-            DIM,
-        ));
-    }
-    if o.level < data::MAX_ABILITY_LEVEL {
-        let next = cast_at(def, o.level + 1, stats);
-        lines.push(TipLine::new("Next rank:", Color::WHITE));
-        lines.push(TipLine::new(next_rank(def, &now, &next), GOLD));
-    } else {
-        lines.push(TipLine::new("Highest rank", DIM));
-    }
-    lines
-}
-
-/// What a passive's bonus `v` does, in the voice of a buff.
-/// A stat's short name, for the card's before » after line.
-fn stat_label(stat: Stat) -> &'static str {
-    match stat {
-        Stat::Might => "All damage",
-        Stat::MaxHp => "Maximum health",
-        Stat::Speed => "Movement speed",
-        Stat::Regen => "Health per second",
-        Stat::Haste => "Recharge speed",
-        Stat::Area => "Area size",
-        Stat::Magnet => "Pickup range",
-        Stat::Growth => "Experience gained",
-        Stat::Armor => "Damage blocked per hit",
-        Stat::Crit => "Critical strike chance",
-    }
-}
-
-fn passive_text(stat: Stat, v: f32) -> String {
-    match stat {
-        Stat::Might => format!("Increases all damage you deal by {}.", pct(v)),
-        Stat::MaxHp => format!("Increases your maximum health by {}.", pct(v)),
-        Stat::Speed => format!("Increases your movement speed by {}.", pct(v)),
-        Stat::Regen => format!("Restores {} health every second.", num(v)),
-        Stat::Haste => format!("Your abilities recharge {} faster.", pct(v)),
-        Stat::Area => format!("Increases the size of your areas of effect by {}.", pct(v)),
-        Stat::Magnet => format!("Increases your pickup range by {}.", pct(v)),
-        Stat::Growth => format!("Increases the experience you gain by {}.", pct(v)),
-        Stat::Armor => format!("Reduces the damage of every hit you take by {}.", num(v)),
-        Stat::Crit => format!(
-            "Increases your chance to critically strike for double damage by {}.",
-            pct(v)
-        ),
-    }
-}
-
-/// The hero's total for the stat a passive raises, every source counted.
-fn stat_total(stat: Stat, s: &Stats) -> String {
-    match stat {
-        Stat::Might => format!("Damage dealt: {}", pct(s.might)),
-        Stat::MaxHp => format!("Maximum health: {}", num(s.max_hp)),
-        Stat::Speed => format!("Movement speed: {} yd per second", num(s.speed)),
-        Stat::Regen => format!("Health restored: {} per second", num(s.regen)),
-        Stat::Haste => format!("Cooldowns: {} shorter", pct(s.haste.min(0.65))),
-        Stat::Area => format!("Area of effect: {}", pct(s.area)),
-        Stat::Magnet => format!("Pickup range: {} yd", num(s.magnet)),
-        Stat::Growth => format!("Experience gained: {}", pct(s.growth)),
-        Stat::Armor => format!("Damage blocked per hit: {}", num(s.armor)),
-        Stat::Crit => format!("Critical strike chance: {}", pct(s.crit)),
-    }
-}
-
-fn passive_tip(p: &PassiveDef, level: u8, stats: &Stats) -> Vec<TipLine> {
-    let mut lines = vec![
-        TipLine::new(p.name, Color::WHITE)
-            .header()
-            .right(format!("Rank {level}"), TIP_GREY),
-        TipLine::new(passive_text(p.stat, p.per_level * f32::from(level)), GOLD),
-        TipLine::new(stat_total(p.stat, stats), Color::WHITE),
-    ];
-    if level < data::MAX_PASSIVE_LEVEL {
-        lines.push(TipLine::new("Next rank:", Color::WHITE));
-        lines.push(TipLine::new(
-            passive_text(p.stat, p.per_level * f32::from(level + 1)),
-            GOLD,
-        ));
-    } else {
-        lines.push(TipLine::new("Highest rank", DIM));
-    }
-    lines
-}
-
-/// The `GameTooltip` frame: `UI-Tooltip-Background` tiled under `UI-Tooltip-Border`, 16-unit edges
-/// and 5-unit insets, its lines 10 units in. Returns the frame and its line column.
-fn spawn_tooltip(
-    commands: &mut Commands,
-    assets: &mut benilla_assets::WorldAssets,
-    images: &mut Assets<Image>,
-    ui_scale: f32,
-) -> (Entity, Entity) {
-    use crate::glue::backdrop::{backdrop_border, backdrop_edges, tiled_bg_node};
-    let bg = assets.sprite_texture("Interface\\Tooltips\\UI-Tooltip-Background", images);
-    let edges = backdrop_edges(assets, "Interface\\Tooltips\\UI-Tooltip-Border", images);
-    let mut body = Entity::PLACEHOLDER;
-    let mut root = commands.spawn((
-        GameTooltip,
-        Node {
-            position_type: PositionType::Absolute,
-            max_width: Val::Px(300.0),
-            ..default()
-        },
-        GlobalZIndex(1000),
-        Visibility::Hidden,
-        bevy::ui::FocusPolicy::Pass,
-    ));
-    if bg.is_none() || edges.is_none() {
-        root.insert(BackgroundColor(TIP_FILL.with_alpha(0.95)));
-    }
-    root.with_children(|t| {
-        if let Some(bg) = bg {
-            t.spawn((
-                tiled_bg_node(bg, 16.0, ui_scale, TIP_FILL),
-                Node {
-                    position_type: PositionType::Absolute,
-                    left: Val::Px(5.0),
-                    right: Val::Px(5.0),
-                    top: Val::Px(5.0),
-                    bottom: Val::Px(5.0),
-                    ..default()
-                },
-            ));
-        }
-        if let Some(edges) = &edges {
-            backdrop_border(t, edges, 16.0, Color::WHITE);
-        }
-        body = t
-            .spawn((
-                TipBody,
-                Node {
-                    flex_direction: FlexDirection::Column,
-                    row_gap: Val::Px(2.0),
-                    padding: UiRect::all(Val::Px(10.0)),
-                    ..default()
-                },
-            ))
-            .id();
-    });
-    (root.id(), body)
-}
-
-/// Hovering a build icon raises its `GameTooltip` under the icon, every number from the current
-/// rank and stats, and what the next rank brings.
-#[allow(clippy::too_many_arguments)]
-pub(super) fn icon_tooltip(
-    mut commands: Commands,
-    phase: Res<State<Phase>>,
-    run: Res<Run>,
-    spells: Option<Res<crate::ui_action::Spells>>,
-    font: Res<HudFont>,
-    ui_scale: Res<UiScale>,
-    mut assets: Option<ResMut<benilla_assets::WorldAssets>>,
-    mut images: ResMut<Assets<Image>>,
-    slots: Query<(
-        &Interaction,
-        &TipFor,
-        &ComputedNode,
-        &bevy::ui::UiGlobalTransform,
-    )>,
-    mut frames: Query<(&mut Node, &mut Visibility), With<GameTooltip>>,
-    mut built: Local<Option<(Entity, Entity)>>,
-    mut shown: Local<Option<(TipFor, u32)>>,
-) {
-    let Some((frame, body)) = *built else {
-        if let Some(assets) = assets.as_deref_mut() {
-            *built = Some(spawn_tooltip(
-                &mut commands,
-                assets,
-                &mut images,
-                ui_scale.0,
-            ));
-        }
-        return;
-    };
-    let Ok((mut node, mut vis)) = frames.get_mut(frame) else {
-        return;
-    };
-    let hovered = slots
-        .iter()
-        .find(|(i, ..)| **i != Interaction::None)
-        .filter(|_| *phase.get() != Phase::Menu);
-    let Some((_, &tip, computed, at)) = hovered else {
-        if *vis != Visibility::Hidden {
-            *vis = Visibility::Hidden;
-        }
-        *shown = None;
-        return;
-    };
-    // Physical pixels to the 768-unit canvas the `Val`s are on.
-    let inv = computed.inverse_scale_factor;
-    let (left, top) = (
-        Val::Px((at.translation.x - computed.size().x / 2.0) * inv),
-        Val::Px((at.translation.y + computed.size().y / 2.0) * inv + 4.0),
-    );
-    if node.left != left || node.top != top {
-        node.left = left;
-        node.top = top;
-    }
-    if *shown == Some((tip, run.version)) {
-        if *vis != Visibility::Inherited {
-            *vis = Visibility::Inherited;
-        }
-        return;
-    }
-    let stats = run.stats();
-    let lines = match tip {
-        TipFor::Ability(i) => run
-            .abilities
-            .get(i)
-            .map(|o| ability_tip(o, &stats, spells.as_deref())),
-        TipFor::Passive(i) => run
-            .passives
-            .get(i)
-            .map(|&(p, level)| passive_tip(p, level, &stats)),
-        TipFor::Mobility => run.mobility().map(|m| {
-            vec![
-                TipLine::new(spell_name(spells.as_deref(), m.spell, m.name), Color::WHITE).header(),
-                TipLine::new("Press F", Color::WHITE)
-                    .right(format!("{} sec cooldown", num(m.cooldown)), Color::WHITE),
-                TipLine::new(m.desc, GOLD),
-            ]
-        }),
-    };
-    let Some(lines) = lines else { return };
-    *shown = Some((tip, run.version));
-    // Shown from the next frame, once the new lines have laid out.
-    *vis = Visibility::Hidden;
-    let f = &font.0;
-    commands.entity(body).despawn_related::<Children>();
-    commands.entity(body).with_children(|b| {
-        for line in lines {
-            let face = |s: String, size: f32, color: Color| {
-                (
-                    Text::new(s),
-                    TextFont {
-                        font: f.clone(),
-                        font_size: size,
-                        ..default()
-                    },
-                    TextColor(color),
-                    TextShadow {
-                        offset: Vec2::splat(1.0),
-                        color: Color::BLACK,
-                    },
-                )
-            };
-            b.spawn(Node {
-                justify_content: JustifyContent::SpaceBetween,
-                column_gap: Val::Px(16.0),
-                ..default()
-            })
-            .with_children(|row| {
-                row.spawn(face(line.left, line.size, line.color));
-                if let Some((text, color)) = line.right {
-                    row.spawn((
-                        face(text, line.size, color),
-                        TextLayout::new(Justify::Right, LineBreak::NoWrap),
-                    ));
-                }
-            });
-        }
-    });
 }
 
 #[allow(clippy::type_complexity)]

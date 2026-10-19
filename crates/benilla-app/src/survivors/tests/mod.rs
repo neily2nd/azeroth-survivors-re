@@ -5,7 +5,8 @@ use bevy::prelude::*;
 
 use super::data;
 use super::hero::{self, Outcome};
-use super::hud::{self, Choice, Offer};
+use super::hud;
+use super::level_up::{self, Choice, Offer};
 use super::{Owned, Phase, Rng, Run, BASE_HP, BASE_MAGNET, BASE_SPEED};
 
 const CASTER: u8 = 8; // Mage
@@ -49,160 +50,15 @@ fn start_of(id: u8) -> &'static str {
     class(id).start
 }
 
-// ── Ability ranks and cooldowns ──────────────────────────────────────────────────────────────────
-
-#[test]
-fn damage_grows_thirty_percent_a_rank() {
-    assert!(close(owned(start_of(CASTER), 1).damage_mult(), 1.0));
-    assert!(close(owned(start_of(CASTER), 2).damage_mult(), 1.3));
-    assert!(close(owned(start_of(CASTER), 8).damage_mult(), 3.1));
-}
-
-#[test]
-fn targets_arrive_at_ranks_three_five_and_seven() {
-    let base = data::ability(start_of(CASTER)).count;
-    for (rank, extra) in [
-        (1, 0),
-        (2, 0),
-        (3, 1),
-        (4, 1),
-        (5, 2),
-        (6, 2),
-        (7, 3),
-        (8, 3),
-    ] {
-        assert_eq!(
-            owned(start_of(CASTER), rank).count(),
-            base + extra,
-            "rank {rank}"
-        );
-    }
-}
-
-#[test]
-fn cooldown_falls_with_rank_and_with_haste() {
-    let def = data::ability(start_of(CASTER));
-    let stats = run_for(CASTER).stats();
-    let at = |rank: u8, haste: f32| {
-        owned(start_of(CASTER), rank).cooldown(&super::Stats { haste, ..stats })
-    };
-    assert!(close(at(1, 0.0), def.cooldown.max(0.2)));
-    assert!(at(2, 0.0) < at(1, 0.0));
-    // Haste shortens by its own fraction, but never past 65 %.
-    assert!(close(at(1, 0.5), (def.cooldown * 0.5).max(0.2)));
-    assert!(close(at(1, 0.9), (def.cooldown * 0.35).max(0.2)));
-}
-
-#[test]
-fn cooldown_never_falls_below_a_fifth_of_a_second() {
-    let stats = super::Stats {
-        haste: 0.99,
-        ..run_for(CASTER).stats()
-    };
-    for def in data::ABILITIES {
-        let cd = owned(def.key, data::MAX_ABILITY_LEVEL).cooldown(&stats);
-        assert!(cd.is_finite() && cd >= 0.2, "{}: {cd}", def.key);
-    }
-}
-
-#[test]
-fn radius_and_duration_scale_with_rank_and_area() {
-    let def = data::ability(start_of(CASTER));
-    let mut stats = run_for(CASTER).stats();
-    stats.area = 1.5;
-    assert!(close(owned(def.key, 1).radius(&stats), def.radius * 1.5));
-    assert!(close(owned(def.key, 3).duration(), def.duration * 1.2));
-}
+mod abilities;
 
 // ── Hero stats and passives ──────────────────────────────────────────────────────────────────────
 
-#[test]
-fn classes_start_with_their_own_health_and_speed() {
-    let warrior = run_for(WARRIOR).stats();
-    assert!(close(warrior.max_hp, BASE_HP + 40.0));
-    assert!(close(warrior.speed, BASE_SPEED));
-
-    let hunter = run_for(HUNTER).stats();
-    assert!(close(hunter.max_hp, BASE_HP + 15.0));
-
-    let mage = run_for(CASTER).stats();
-    assert!(close(mage.max_hp, BASE_HP));
-    assert!(close(mage.speed, BASE_SPEED + 0.5));
-}
-
-#[test]
-fn fortitude_multiplies_health_by_its_rank() {
-    let mut run = run_for(CASTER);
-    run.passives.push((passive("fortitude"), 2));
-    assert!(close(run.stats().max_hp, BASE_HP * 1.4));
-}
-
-#[test]
-fn additive_passives_stack_by_rank() {
-    let mut run = run_for(CASTER);
-    run.passives.push((passive("might"), 3));
-    run.passives.push((passive("wild"), 2));
-    run.passives.push((passive("renew"), 2));
-    run.passives.push((passive("kings"), 4));
-    let s = run.stats();
-    assert!(close(s.might, 1.3));
-    assert!(close(s.armor, 2.0));
-    assert!(close(s.regen, 1.0));
-    assert!(
-        close(s.crit, 0.05 + 0.20),
-        "base 5 % plus rank 4 of 5 % each"
-    );
-}
-
-#[test]
-fn magnet_and_speed_multiply_by_their_passives() {
-    let mut run = run_for(CASTER);
-    run.passives.push((passive("detect"), 1));
-    run.passives.push((passive("pack"), 1));
-    let s = run.stats();
-    assert!(close(s.magnet, BASE_MAGNET * 1.4));
-    assert!(close(s.speed, (BASE_SPEED + 0.5) * 1.1));
-}
-
-#[test]
-fn every_guid_is_new() {
-    let mut run = Run::default();
-    let first = run.guid();
-    let second = run.guid();
-    assert!(second > first);
-}
+mod hero_tests;
 
 // ── Dice ─────────────────────────────────────────────────────────────────────────────────────────
 
-#[test]
-fn seeded_dice_repeat_exactly() {
-    let draw = |seed| {
-        let mut rng = Rng::seeded(seed);
-        (0..100).map(|_| rng.next_u64()).collect::<Vec<_>>()
-    };
-    assert_eq!(draw(42), draw(42));
-    assert_ne!(draw(42), draw(43));
-}
-
-#[test]
-fn unit_draws_stay_in_zero_to_one() {
-    let mut rng = Rng::seeded(7);
-    for _ in 0..10_000 {
-        let v = rng.f32();
-        assert!((0.0..1.0).contains(&v), "{v}");
-    }
-}
-
-#[test]
-fn index_and_range_handle_edge_inputs() {
-    let mut rng = Rng::seeded(9);
-    assert_eq!(rng.index(0), 0, "an empty pick falls back to slot 0");
-    for _ in 0..1_000 {
-        assert!(rng.index(7) < 7);
-        let r = rng.range(2.0, 3.0);
-        assert!((2.0..3.0).contains(&r), "{r}");
-    }
-}
+mod rng;
 
 // ── Data invariants ──────────────────────────────────────────────────────────────────────────────
 
@@ -384,12 +240,6 @@ fn non_finite_experience_is_left_alone() {
 }
 
 #[test]
-fn a_degenerate_range_returns_its_bound() {
-    let mut rng = Rng::seeded(4);
-    assert_eq!(rng.range(2.5, 2.5), 2.5);
-}
-
-#[test]
 fn closing_rings_fall_halfway_between_bosses() {
     let half = data::BOSS_EVERY_SECS / 2.0;
     assert_eq!(data::rings_due(0.0), 0);
@@ -521,7 +371,7 @@ fn full_ability_slots() -> Vec<Owned> {
 fn a_fresh_run_is_offered_three_distinct_choices() {
     let run = run_for(CASTER);
     for seed in 1..200 {
-        let offer = hud::choices_for(&run, &mut Rng::seeded(seed));
+        let offer = level_up::choices_for(&run, &mut Rng::seeded(seed));
         assert_eq!(offer.len(), 3, "seed {seed}");
         let mut labels: Vec<String> = offer.iter().map(label).collect();
         labels.sort();
@@ -535,7 +385,7 @@ fn an_offer_never_teaches_a_spell_the_run_already_has() {
     let mut run = run_for(CASTER);
     run.abilities.push(owned(start_of(CASTER), 1));
     for seed in 1..300 {
-        for c in hud::choices_for(&run, &mut Rng::seeded(seed)) {
+        for c in level_up::choices_for(&run, &mut Rng::seeded(seed)) {
             if let Choice::NewAbility(def) = c {
                 assert_ne!(def.key, start_of(CASTER), "seed {seed}");
             }
@@ -548,7 +398,7 @@ fn full_ability_slots_offer_no_new_spells() {
     let mut run = run_for(CASTER);
     run.abilities = full_ability_slots();
     for seed in 1..300 {
-        for c in hud::choices_for(&run, &mut Rng::seeded(seed)) {
+        for c in level_up::choices_for(&run, &mut Rng::seeded(seed)) {
             assert!(!matches!(c, Choice::NewAbility(_)), "seed {seed}");
         }
     }
@@ -563,7 +413,7 @@ fn full_passive_slots_offer_no_new_passives() {
         .map(|p| (p, 1))
         .collect();
     for seed in 1..300 {
-        for c in hud::choices_for(&run, &mut Rng::seeded(seed)) {
+        for c in level_up::choices_for(&run, &mut Rng::seeded(seed)) {
             assert!(!matches!(c, Choice::NewPassive(_)), "seed {seed}");
         }
     }
@@ -574,7 +424,7 @@ fn a_maxed_spell_is_never_offered_an_upgrade() {
     let mut run = run_for(CASTER);
     run.abilities = vec![owned(start_of(CASTER), data::MAX_ABILITY_LEVEL)];
     for seed in 1..200 {
-        for c in hud::choices_for(&run, &mut Rng::seeded(seed)) {
+        for c in level_up::choices_for(&run, &mut Rng::seeded(seed)) {
             assert!(!matches!(c, Choice::Upgrade(_)), "seed {seed}");
         }
     }
@@ -595,18 +445,18 @@ fn a_fully_ranked_run_is_offered_only_a_heal() {
         .take(data::MAX_PASSIVES)
         .map(|p| (p, data::MAX_PASSIVE_LEVEL))
         .collect();
-    let offer = hud::choices_for(&run, &mut Rng::seeded(3));
+    let offer = level_up::choices_for(&run, &mut Rng::seeded(3));
     assert_eq!(offer.iter().map(label).collect::<Vec<_>>(), ["heal"]);
 }
 
 #[test]
 fn the_same_seed_gives_the_same_offer() {
     let run = run_for(CASTER);
-    let a: Vec<String> = hud::choices_for(&run, &mut Rng::seeded(11))
+    let a: Vec<String> = level_up::choices_for(&run, &mut Rng::seeded(11))
         .iter()
         .map(label)
         .collect();
-    let b: Vec<String> = hud::choices_for(&run, &mut Rng::seeded(11))
+    let b: Vec<String> = level_up::choices_for(&run, &mut Rng::seeded(11))
         .iter()
         .map(label)
         .collect();
@@ -623,7 +473,7 @@ fn picking_a_spell_adds_it_at_rank_one_and_resumes_play() {
         choices: vec![Choice::NewAbility(data::ability(start_of(CASTER)))],
     };
     let mut next = NextState::<Phase>::default();
-    hud::pick(0, &mut run, &mut offer, &mut Rng::seeded(1), &mut next);
+    level_up::pick(0, &mut run, &mut offer, &mut Rng::seeded(1), &mut next);
 
     assert_eq!(run.abilities.len(), 1);
     assert_eq!(run.abilities[0].level, 1);
@@ -643,7 +493,7 @@ fn picking_while_more_levels_are_owed_redraws_the_offer() {
         choices: vec![Choice::Upgrade(0)],
     };
     let mut next = NextState::<Phase>::default();
-    hud::pick(0, &mut run, &mut offer, &mut Rng::seeded(1), &mut next);
+    level_up::pick(0, &mut run, &mut offer, &mut Rng::seeded(1), &mut next);
 
     assert_eq!(run.abilities[0].level, 2);
     assert_eq!(run.pending_levels, 1);
@@ -661,7 +511,7 @@ fn an_out_of_range_pick_changes_nothing() {
         choices: vec![Choice::Heal],
     };
     let mut next = NextState::<Phase>::default();
-    hud::pick(4, &mut run, &mut offer, &mut Rng::seeded(1), &mut next);
+    level_up::pick(4, &mut run, &mut offer, &mut Rng::seeded(1), &mut next);
 
     assert_eq!(run.pending_levels, 1);
     assert_eq!(offer.choices().len(), 1);
@@ -679,6 +529,6 @@ fn heal_restores_health_to_the_maximum() {
         choices: vec![Choice::Heal],
     };
     let mut next = NextState::<Phase>::default();
-    hud::pick(0, &mut run, &mut offer, &mut Rng::seeded(1), &mut next);
+    level_up::pick(0, &mut run, &mut offer, &mut Rng::seeded(1), &mut next);
     assert!(close(run.hp, run.stats().max_hp));
 }
