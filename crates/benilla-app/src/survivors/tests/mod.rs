@@ -60,11 +60,6 @@ mod hero_tests;
 
 mod rng;
 
-
-
-
-
-
 // ── Data invariants ──────────────────────────────────────────────────────────────────────────────
 
 #[test]
@@ -243,8 +238,6 @@ fn non_finite_experience_is_left_alone() {
     assert_eq!(level, 3);
     assert!(xp.is_nan());
 }
-
-
 
 #[test]
 fn closing_rings_fall_halfway_between_bosses() {

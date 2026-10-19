@@ -934,6 +934,4 @@ mod tests {
             assert_eq!(roll(&mut rng, 0.0, 10.0), (10.0, false));
         }
     }
-
-
 }

@@ -1,7 +1,7 @@
 use bevy::prelude::*;
 
 use super::data::{self, AbilityDef, Kind, PassiveDef, Stat};
-use super::descriptions::{Cast, ability_body, cast_at, num, passive_text, pct, spell_name};
+use super::descriptions::{ability_body, cast_at, num, passive_text, pct, spell_name, Cast};
 use super::hud::{self, DIM, GOLD};
 use super::{Owned, Phase, Run, Stats};
 
@@ -389,11 +389,9 @@ mod tests {
                 &cast_at(ability.def, ability.level, &run.stats())
             )
         );
-        assert!(
-            lines[4]
-                .left
-                .ends_with("chance to critically strike for double damage")
-        );
+        assert!(lines[4]
+            .left
+            .ends_with("chance to critically strike for double damage"));
         assert_eq!(lines[5].left, "Highest rank");
     }
 
